@@ -1,1 +1,20 @@
-*.ai
+# AI agent artifacts
+.omo/
+.codegraph
+
+# OS files
+.DS_Store
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
