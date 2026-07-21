@@ -1,4 +1,4 @@
-# 🤖 ML Image Classification Template
+# 🧕 ML Hijab vs Non-Hijab Classification
 > Auto folder-label · Multi-algorithm · Realtime Webcam + Video + Image
 
 ---
@@ -6,10 +6,10 @@
 ## 📁 File Structure
 
 ```
-ml_template/
-├── training_colab.ipynb   ← Training in Google Colab
-├── app_streamlit.py       ← Streamlit implementation (web UI)
-├── app_realtime.py        ← Python OpenCV implementation (desktop)
+ML_hijab_nonhijab/
+├── template_ml_image.ipynb   ← Training in Google Colab
+├── app_streamlit.py          ← Streamlit implementation (web UI)
+├── app_regular.py            ← Python OpenCV implementation (desktop)
 └── README.md
 ```
 

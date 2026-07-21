@@ -146,8 +146,34 @@ def extract_features_classical(img_rgb: np.ndarray):
     return feat
 
 
-def predict(img_rgb: np.ndarray, model, meta: dict, class_names: list):
-    """Jalankan prediksi dan return class + probabilities."""
+def filter_target_probs(all_probs: dict, focus_classes: list = None):
+    """Filter probabilitas untuk fokus pada kelas target dan re-normalisasi."""
+    if not focus_classes:
+        pred_class, confidence = max(all_probs.items(), key=lambda x: x[1])
+        return pred_class, confidence, all_probs
+
+    matched = {}
+    for fc in focus_classes:
+        for k, v in all_probs.items():
+            if k.lower() == fc.lower():
+                matched[k] = v
+
+    if not matched:
+        pred_class, confidence = max(all_probs.items(), key=lambda x: x[1])
+        return pred_class, confidence, all_probs
+
+    total = sum(matched.values())
+    if total > 0:
+        norm_probs = {k: v / total for k, v in matched.items()}
+    else:
+        norm_probs = {k: 1.0 / len(matched) for k in matched}
+
+    pred_class, confidence = max(norm_probs.items(), key=lambda x: x[1])
+    return pred_class, confidence, norm_probs
+
+
+def predict(img_rgb: np.ndarray, model, meta: dict, class_names: list, focus_classes: list = None):
+    """Jalankan prediksi dan return class + probabilities terfokus."""
     img_size = tuple(meta['img_size'])
     is_dl    = meta['is_dl']
     algo     = meta.get('algorithm', 'MobileNetV2')
@@ -155,24 +181,20 @@ def predict(img_rgb: np.ndarray, model, meta: dict, class_names: list):
     if is_dl:
         img_proc = preprocess_image(img_rgb, img_size, algo, is_dl=True)
         probs = model.predict(img_proc[np.newaxis], verbose=0)[0]
-        pred_idx   = int(np.argmax(probs))
-        pred_class = class_names[pred_idx]
-        confidence = float(probs[pred_idx])
-        all_probs  = {cls: float(p) for cls, p in zip(class_names, probs)}
+        all_probs = {cls: float(p) for cls, p in zip(class_names, probs)}
     else:
         feat = extract_features_classical(img_rgb)
         pred_raw = model.predict([feat])[0]
-        pred_class = class_names[pred_raw]
+        pred_class_raw = class_names[pred_raw]
 
         if hasattr(model, 'predict_proba'):
             probs_arr = model.predict_proba([feat])[0]
-            confidence = float(np.max(probs_arr))
-            all_probs  = {cls: float(p) for cls, p in zip(class_names, probs_arr)}
+            all_probs = {cls: float(p) for cls, p in zip(class_names, probs_arr)}
         else:
-            confidence = 1.0
-            all_probs  = {cls: (1.0 if cls == pred_class else 0.0) for cls in class_names}
+            all_probs = {cls: (1.0 if cls == pred_class_raw else 0.0) for cls in class_names}
 
-    return pred_class, confidence, all_probs
+    pred_class, confidence, target_probs = filter_target_probs(all_probs, focus_classes)
+    return pred_class, confidence, target_probs
 
 
 def draw_overlay(frame: np.ndarray, pred_class: str,
@@ -220,11 +242,45 @@ def main():
         st.info('Pastikan sudah training di Colab dan copy folder `ml_output` ke direktori ini.')
         return
 
-    # Info model
+    # Sidebar: Fokus Prediksi & Info Model
+    with st.sidebar:
+        st.header('🎯 Fokus Prediksi')
+        focus_option = st.selectbox(
+            'Target Klasifikasi:',
+            [
+                '🧕 Hijab vs Non-Hijab (Utama)',
+                '🌐 Semua Kelas (9 Kelas)',
+                '😊 Ekspresi (Happy)',
+                '🔢 Angka (0-5)'
+            ],
+            index=0
+        )
+
+        if focus_option == '🧕 Hijab vs Non-Hijab (Utama)':
+            focus_classes = ['hijab', 'nonhijab']
+        elif focus_option == '😊 Ekspresi (Happy)':
+            focus_classes = ['Happy']
+        elif focus_option == '🔢 Angka (0-5)':
+            focus_classes = ['0', '1', '2', '3', '4', '5']
+        else:
+            focus_classes = None
+
+        st.divider()
+        st.header('📋 Info Model')
+        st.write(f'**Algoritma:** {meta["algorithm"]}')
+        st.write(f'**Mode:** {"Deep Learning" if meta["is_dl"] else "Classical ML"}')
+        st.write(f'**Akurasi:** {meta["accuracy"]*100:.1f}%')
+        st.write(f'**Input Size:** {meta["img_size"][0]}×{meta["img_size"][1]}')
+        st.divider()
+        st.write('**Kelas yang Dikenali:**')
+        for i, cls in enumerate(class_names):
+            st.write(f'  {i+1}. {cls}')
+
+    # Info model di header
     col1, col2, col3, col4 = st.columns(4)
     col1.metric('Algoritma', meta['algorithm'])
-    col2.metric('Jumlah Kelas', meta['num_classes'])
-    col3.metric('Akurasi Training', f"{meta['accuracy']*100:.1f}%")
+    col2.metric('Target Fokus', focus_option.split(' ')[1] if ' ' in focus_option else focus_option)
+    col3.metric('Akurasi Model', f"{meta['accuracy']*100:.1f}%")
     col4.metric('Input Size', f"{meta['img_size'][0]}×{meta['img_size'][1]}")
 
     st.divider()
@@ -250,7 +306,7 @@ def main():
                 img_arr = np.array(img_pil)
 
                 pred_class, confidence, all_probs = predict(
-                    img_arr, model, meta, class_names
+                    img_arr, model, meta, class_names, focus_classes
                 )
 
                 c1, c2 = st.columns([1, 1])
@@ -266,9 +322,9 @@ def main():
                         unsafe_allow_html=True
                     )
                     st.metric('Confidence', f'{confidence*100:.1f}%')
-                    st.markdown('**Semua Kelas:**')
+                    st.markdown('**Probabilitas Terfokus:**')
                     for cls, prob in sorted(all_probs.items(), key=lambda x: -x[1]):
-                        st.progress(prob, text=f'{cls}: {prob*100:.1f}%')
+                        st.progress(float(np.clip(prob, 0.0, 1.0)), text=f'{cls}: {prob*100:.1f}%')
                 st.divider()
 
     # ── MODE 2: Upload Video ──
@@ -279,10 +335,10 @@ def main():
         )
 
         if uploaded_video:
-            # Simpan sementara
-            tmp_path = '/tmp/uploaded_video.mp4'
-            with open(tmp_path, 'wb') as f:
-                f.write(uploaded_video.read())
+            import tempfile
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp_file:
+                tmp_file.write(uploaded_video.read())
+                tmp_path = tmp_file.name
 
             skip_frame = st.slider('Prediksi setiap N frame', 1, 30, 5)
             start_btn  = st.button('▶️ Mulai Proses Video')
@@ -296,7 +352,7 @@ def main():
 
                 frame_placeholder = st.empty()
                 info_placeholder  = st.empty()
-                progress_bar      = st.progress(0)
+                progress_bar      = st.progress(0.0)
 
                 frame_idx = 0
                 pred_class, confidence, all_probs = '...', 0.0, {}
@@ -310,7 +366,7 @@ def main():
 
                     if frame_idx % skip_frame == 0:
                         pred_class, confidence, all_probs = predict(
-                            frame_rgb, model, meta, class_names
+                            frame_rgb, model, meta, class_names, focus_classes
                         )
 
                     # Overlay
@@ -336,20 +392,20 @@ def main():
             '3. Klik "📸 Capture & Prediksi" untuk mengambil gambar'
         )
 
-        # Coba pakai streamlit-webrtc untuk realtime
         try:
             from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
             import av
 
             class RealtimeClassifier(VideoTransformerBase):
                 def __init__(self):
-                    self.model      = model
-                    self.meta       = meta
-                    self.class_names = class_names
-                    self.pred_class  = ''
-                    self.confidence  = 0.0
-                    self.frame_count = 0
-                    self.skip        = 5  # prediksi setiap 5 frame
+                    self.model         = model
+                    self.meta          = meta
+                    self.class_names   = class_names
+                    self.focus_classes = focus_classes
+                    self.pred_class    = ''
+                    self.confidence    = 0.0
+                    self.frame_count   = 0
+                    self.skip          = 5
 
                 def recv(self, frame):
                     img = frame.to_ndarray(format='bgr24')
@@ -358,7 +414,7 @@ def main():
                     self.frame_count += 1
                     if self.frame_count % self.skip == 0:
                         self.pred_class, self.confidence, _ = predict(
-                            img_rgb, self.model, self.meta, self.class_names
+                            img_rgb, self.model, self.meta, self.class_names, self.focus_classes
                         )
 
                     if self.pred_class:
@@ -382,7 +438,6 @@ def main():
             )
 
         except ImportError:
-            # Fallback: snapshot webcam via st.camera_input
             st.warning(
                 '`streamlit-webrtc` tidak terinstall. '
                 'Menggunakan mode snapshot (install `pip install streamlit-webrtc av` untuk realtime penuh).'
@@ -394,7 +449,7 @@ def main():
                 img_arr = np.array(img_pil)
 
                 pred_class, confidence, all_probs = predict(
-                    img_arr, model, meta, class_names
+                    img_arr, model, meta, class_names, focus_classes
                 )
 
                 c1, c2 = st.columns([1, 1])
@@ -409,19 +464,7 @@ def main():
                     )
                     st.metric('Confidence', f'{confidence*100:.1f}%')
                     for cls, prob in sorted(all_probs.items(), key=lambda x: -x[1]):
-                        st.progress(prob, text=f'{cls}: {prob*100:.1f}%')
-
-    # Sidebar: info kelas
-    with st.sidebar:
-        st.header('📋 Info Model')
-        st.write(f'**Algoritma:** {meta["algorithm"]}')
-        st.write(f'**Mode:** {"Deep Learning" if meta["is_dl"] else "Classical ML"}')
-        st.write(f'**Akurasi:** {meta["accuracy"]*100:.1f}%')
-        st.write(f'**Input Size:** {meta["img_size"][0]}×{meta["img_size"][1]}')
-        st.divider()
-        st.write('**Kelas yang Dikenali:**')
-        for i, cls in enumerate(class_names):
-            st.write(f'  {i+1}. {cls}')
+                        st.progress(float(np.clip(prob, 0.0, 1.0)), text=f'{cls}: {prob*100:.1f}%')
 
 
 if __name__ == '__main__':

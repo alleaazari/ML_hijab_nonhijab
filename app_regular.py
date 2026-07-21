@@ -173,8 +173,34 @@ def extract_hog(img_rgb: np.ndarray, target_size=(128, 128)) -> np.ndarray:
                cells_per_block=(2, 2), visualize=False)
 
 
-def predict_frame(img_rgb: np.ndarray, model, meta: dict, class_names: list):
-    """Return (pred_class, confidence, all_probs_dict)."""
+def filter_target_probs(all_probs: dict, focus_classes: list = None):
+    """Filter probabilitas untuk fokus pada kelas target dan re-normalisasi."""
+    if not focus_classes:
+        pred_class, confidence = max(all_probs.items(), key=lambda x: x[1])
+        return pred_class, confidence, all_probs
+
+    matched = {}
+    for fc in focus_classes:
+        for k, v in all_probs.items():
+            if k.lower() == fc.lower():
+                matched[k] = v
+
+    if not matched:
+        pred_class, confidence = max(all_probs.items(), key=lambda x: x[1])
+        return pred_class, confidence, all_probs
+
+    total = sum(matched.values())
+    if total > 0:
+        norm_probs = {k: v / total for k, v in matched.items()}
+    else:
+        norm_probs = {k: 1.0 / len(matched) for k in matched}
+
+    pred_class, confidence = max(norm_probs.items(), key=lambda x: x[1])
+    return pred_class, confidence, norm_probs
+
+
+def predict_frame(img_rgb: np.ndarray, model, meta: dict, class_names: list, focus_classes: list = None):
+    """Return (pred_class, confidence, target_probs_dict)."""
     img_size = tuple(meta['img_size'])
     is_dl    = meta['is_dl']
     algo     = meta.get('algorithm', 'MobileNetV2')
@@ -193,25 +219,20 @@ def predict_frame(img_rgb: np.ndarray, model, meta: dict, class_names: list):
         else:
             img_proc = img / 255.0
 
-        probs    = model.predict(img_proc[np.newaxis], verbose=0)[0]
-        pred_idx = int(np.argmax(probs))
-        return (
-            class_names[pred_idx],
-            float(probs[pred_idx]),
-            {cls: float(p) for cls, p in zip(class_names, probs)}
-        )
+        probs = model.predict(img_proc[np.newaxis], verbose=0)[0]
+        all_probs = {cls: float(p) for cls, p in zip(class_names, probs)}
     else:
         feat = extract_hog(img_rgb, img_size)
         pred_raw = model.predict([feat])[0]
-        pred_class = class_names[pred_raw]
+        pred_class_raw = class_names[pred_raw]
         if hasattr(model, 'predict_proba'):
             probs_arr  = model.predict_proba([feat])[0]
-            confidence = float(np.max(probs_arr))
             all_probs  = {cls: float(p) for cls, p in zip(class_names, probs_arr)}
         else:
-            confidence = 1.0
-            all_probs  = {cls: (1.0 if cls == pred_class else 0.0) for cls in class_names}
-        return pred_class, confidence, all_probs
+            all_probs  = {cls: (1.0 if cls == pred_class_raw else 0.0) for cls in class_names}
+
+    pred_class, confidence, target_probs = filter_target_probs(all_probs, focus_classes)
+    return pred_class, confidence, target_probs
 
 
 # ─────────────────────────────────────────────
@@ -251,7 +272,9 @@ def render_overlay(frame: np.ndarray, pred_class: str, confidence: float,
 
     # ── Panel kanan: semua kelas ──
     panel_right_w = 220
-    panel_right_h = 30 + len(class_names) * 38
+    max_h_avail   = h - panel_h - 50
+    row_h         = min(36, max(24, max_h_avail // max(1, len(class_names))))
+    panel_right_h = 30 + len(class_names) * row_h
     px, py = w - panel_right_w - 10, panel_h + 10
 
     overlay2 = out.copy()
@@ -262,19 +285,21 @@ def render_overlay(frame: np.ndarray, pred_class: str, confidence: float,
     cv2.putText(out, 'PROBABILITAS', (px + 8, py + 20),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, COLOR_GRAY, 1)
 
+    bar_h  = max(10, row_h - 18)
+    font_s = 0.38 if row_h >= 30 else 0.32
     for i, cls in enumerate(sorted(all_probs.items(), key=lambda x: -x[1])):
         cls_name, prob = cls
-        cy = py + 32 + i * 38
+        cy = py + 28 + i * row_h
         bar_len = int((panel_right_w - 20) * prob)
         c = get_color(prob)
 
-        cv2.rectangle(out, (px + 8, cy), (px + 8 + bar_len, cy + 16), c, -1)
-        cv2.rectangle(out, (px + 8, cy), (px + panel_right_w - 12, cy + 16),
+        cv2.rectangle(out, (px + 8, cy), (px + 8 + bar_len, cy + bar_h), c, -1)
+        cv2.rectangle(out, (px + 8, cy), (px + panel_right_w - 12, cy + bar_h),
                       COLOR_GRAY, 1)
 
         label_txt = f'{cls_name[:15]}: {prob*100:.0f}%'
-        cv2.putText(out, label_txt, (px + 10, cy + 28),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.38,
+        cv2.putText(out, label_txt, (px + 10, cy + bar_h + 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, font_s,
                     COLOR_WHITE if prob > 0.1 else COLOR_GRAY, 1)
 
     # ── Panel bawah: info ──
@@ -347,7 +372,7 @@ def run_webcam(model, meta, class_names, camera_index=0):
         # Prediksi setiap N frame
         if frame_idx % PREDICT_EVERY == 0:
             pred_class, confidence, all_probs = predict_frame(
-                frame_rgb, model, meta, class_names
+                frame_rgb, model, meta, class_names, focus_classes=['hijab', 'nonhijab']
             )
 
         # Hitung FPS
@@ -414,7 +439,7 @@ def run_video(video_path: str, model, meta, class_names):
 
             if frame_idx % PREDICT_EVERY == 0:
                 pred_class, confidence, all_probs = predict_frame(
-                    frame_rgb, model, meta, class_names
+                    frame_rgb, model, meta, class_names, focus_classes=['hijab', 'nonhijab']
                 )
 
             curr_time = cv2.getTickCount()
@@ -469,7 +494,7 @@ def run_image(image_path: str, model, meta, class_names):
         return
 
     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    pred_class, confidence, all_probs = predict_frame(img_rgb, model, meta, class_names)
+    pred_class, confidence, all_probs = predict_frame(img_rgb, model, meta, class_names, focus_classes=['hijab', 'nonhijab'])
 
     print(f'\n  🎯 Prediksi  : {pred_class}')
     print(f'  📊 Confidence: {confidence*100:.2f}%')
